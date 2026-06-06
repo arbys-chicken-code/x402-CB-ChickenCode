@@ -11,6 +11,7 @@ This directory contains TypeScript server examples demonstrating how to protect 
 | [`hono/`](./hono/) | Using `@x402/hono` middleware |
 | [`advanced/`](./advanced/) | Advanced patterns: hooks, dynamic pricing, custom tokens |
 | [`custom/`](./custom/) | Manual implementation using only `@x402/core` |
+| [`agentforge/`](./agentforge/) | **AgentForge Intelligence Suite** — a complete, production-ready paid multi-service MCP + HTTP API product (8 services) built for AI agents and Agentic.market |
 
 ## Framework Examples
 
