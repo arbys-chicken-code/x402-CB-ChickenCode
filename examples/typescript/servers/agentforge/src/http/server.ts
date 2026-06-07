@@ -204,13 +204,20 @@ export function mountHttp(app: Express, deps: HttpDeps): void {
     app.post(service.http.path, rateLimitMiddleware(service, deps), serviceHandler(service, deps));
   }
 
-  // ----- Fallback -----
+  logger.info("HTTP API mounted", { paidRoutes: SERVICES.length });
+}
+
+/**
+ * Register a JSON 404 fallback. Mount this LAST, after all other routes
+ * (including MCP routes in single-port mode).
+ *
+ * @param app - The Express application.
+ */
+export function mountNotFound(app: Express): void {
   app.use((_req, res) => {
     res.status(404).json({
       ok: false,
       error: { type: "not_found", message: "Unknown endpoint. See GET /catalog." },
     });
   });
-
-  logger.info("HTTP API mounted", { paidRoutes: SERVICES.length });
 }

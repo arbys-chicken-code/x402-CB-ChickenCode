@@ -1,0 +1,21 @@
+# Keep the Docker build context (and Railway upload) lean. Dependencies are
+# installed fresh inside the image, and these paths are unused by the
+# AgentForge container build.
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/*.log
+**/.env
+.git
+.github
+go
+java
+python
+e2e
+docs
+specs
+contracts
+foundation
+static
+typescript/site

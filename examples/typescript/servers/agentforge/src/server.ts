@@ -11,11 +11,12 @@ import type { Server } from "node:http";
 import express from "express";
 
 import { loadConfig } from "./config";
-import { mountHttp } from "./http/server";
+import { mountHttp, mountNotFound } from "./http/server";
 import { createLogger } from "./logger";
 import { mountMcp } from "./mcp/server";
 import { Metrics } from "./metrics";
 import { createPaymentLayer } from "./payments";
+import { initProviders, getLlm } from "./providers";
 import { RateLimiter } from "./rateLimiter";
 import { SERVICES } from "./services";
 
@@ -52,9 +53,12 @@ export async function startServer(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config.logLevel);
 
+  initProviders(config);
+
   logger.info("Booting AgentForge Intelligence Suite", {
     network: config.network,
     services: SERVICES.length,
+    llm: getLlm().isConfigured() ? getLlm().modelName() : "builtin-fallback",
   });
 
   const payments = await createPaymentLayer(config, logger);
@@ -62,23 +66,35 @@ export async function startServer(): Promise<void> {
   const rateLimiter = new RateLimiter(config.rateLimitMax, config.rateLimitWindowMs);
 
   const deps = { config, payments, metrics, rateLimiter };
-
-  const mcpApp = express();
-  mountMcp(mcpApp, { ...deps, logger: logger.child("mcp") });
-
-  const httpApp = express();
-  mountHttp(httpApp, { ...deps, logger: logger.child("http") });
-
   const servers: Server[] = [];
 
-  await new Promise<void>(resolve => {
-    servers.push(mcpApp.listen(config.mcpPort, () => resolve()));
-  });
-  await new Promise<void>(resolve => {
-    servers.push(httpApp.listen(config.httpPort, () => resolve()));
-  });
+  if (config.singlePort) {
+    // Single-port mode (Railway / most PaaS): both transports share one port.
+    const app = express();
+    mountHttp(app, { ...deps, logger: logger.child("http") });
+    mountMcp(app, { ...deps, logger: logger.child("mcp") });
+    mountNotFound(app);
+    await new Promise<void>(resolve => {
+      servers.push(app.listen(config.singlePort, () => resolve()));
+    });
+    printBanner(config.singlePort, config.singlePort);
+  } else {
+    // Two-port mode (local dev): MCP and REST on dedicated ports.
+    const mcpApp = express();
+    mountMcp(mcpApp, { ...deps, logger: logger.child("mcp") });
 
-  printBanner(config.mcpPort, config.httpPort);
+    const httpApp = express();
+    mountHttp(httpApp, { ...deps, logger: logger.child("http") });
+    mountNotFound(httpApp);
+
+    await new Promise<void>(resolve => {
+      servers.push(mcpApp.listen(config.mcpPort, () => resolve()));
+    });
+    await new Promise<void>(resolve => {
+      servers.push(httpApp.listen(config.httpPort, () => resolve()));
+    });
+    printBanner(config.mcpPort, config.httpPort);
+  }
 
   let shuttingDown = false;
   /**
