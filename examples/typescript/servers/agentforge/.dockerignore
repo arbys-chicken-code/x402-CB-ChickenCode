@@ -1,0 +1,18 @@
+# Build context is the repo root; keep it lean and avoid leaking local secrets.
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/.env
+**/*.log
+.git
+go
+java
+python
+e2e
+docs
+specs
+contracts
+foundation
+static
+typescript/site

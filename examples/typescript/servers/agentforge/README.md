@@ -127,6 +127,50 @@ Use [`@x402/fetch`](../../../typescript/packages/http/fetch) or any x402 client 
 4. Server verifies via the facilitator, runs the service, then **settles on-chain**.
 5. The settlement receipt is returned (MCP `_meta` / HTTP headers) and recorded in `/receipts`.
 
+## Deploy & go live
+
+The suite is a single long-running process that serves both transports, so deploy it to a host that supports persistent connections (Railway, Render, Fly.io, a VM, etc.) — **not** a short-lived serverless function (the MCP SSE stream must stay open).
+
+### Option A — Docker (recommended for hosted platforms)
+
+A [`Dockerfile`](./Dockerfile) is included. Because this example links to the x402 packages by path inside the monorepo, **the build context must be the repository root**:
+
+```bash
+# from the repo root
+docker build -f examples/typescript/servers/agentforge/Dockerfile -t agentforge .
+
+docker run -p 4021:4021 -p 4022:4022 \
+  -e EVM_ADDRESS=0xYourReceivingWallet \
+  -e FACILITATOR_URL=https://x402.org/facilitator \
+  -e NETWORK=eip155:8453 \
+  -e HTTP_PUBLIC_URL=https://your-host \
+  -e MCP_PUBLIC_URL=https://your-host \
+  agentforge
+```
+
+On **Railway / Render / Fly.io**: point the service at this Dockerfile path, keep the build context at the repo root, expose ports `4021` (REST) and `4022` (MCP/SSE), and set the environment variables above in the dashboard.
+
+### Option B — Plain Node (VM / bare metal)
+
+```bash
+# build the core packages once, then run the example
+cd typescript && pnpm install && pnpm exec turbo run build \
+  --filter=@x402/mcp --filter=@x402/express --filter=@x402/evm --filter=@x402/extensions
+cd ../examples/typescript && pnpm install
+cd servers/agentforge && cp .env-local .env   # then edit .env
+pnpm start
+```
+
+### Going from testnet to mainnet
+
+|               | Validate (free)                    | Production (real revenue)        |
+| ------------- | ---------------------------------- | -------------------------------- |
+| `NETWORK`     | `eip155:84532` (Base Sepolia)      | `eip155:8453` (Base mainnet)     |
+| `EVM_ADDRESS` | any wallet you control             | your production receiving wallet |
+| Test funds    | Base Sepolia testnet USDC (faucet) | real USDC                        |
+
+Validate the full pay loop on testnet first using the [MCP client example](../../clients/mcp) with a funded test wallet, confirm a settlement receipt appears in `GET /receipts`, then flip `NETWORK` to mainnet.
+
 ## Listing on Agentic.market
 
 The suite is built to be marketplace-ready:
