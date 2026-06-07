@@ -8,8 +8,17 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
 import { round, tokenize } from "./util";
+
+interface LlmSentiment {
+  label: "positive" | "negative" | "neutral";
+  score: number;
+  confidence: number;
+  rationale: string;
+  topDrivers: string[];
+}
 
 const POSITIVE = new Map<string, number>([
   ["good", 1],
@@ -79,13 +88,40 @@ const schema = z.object({
 });
 
 /**
- * Score the sentiment of a body of text.
+ * Score sentiment using the configured LLM, when available.
  *
- * @param args - Raw arguments validated against the service schema.
+ * @param text - The text to analyze.
+ * @returns A {@link ServiceResult}, or null to fall back to the lexicon engine.
+ */
+async function llmSentiment(text: string): Promise<ServiceResult | null> {
+  const out = await llmJson<LlmSentiment>(
+    "You are a precise sentiment analysis engine. Respond ONLY with a JSON object.",
+    `Analyze the sentiment of the TEXT. Return JSON with keys: ` +
+      `label ("positive" | "negative" | "neutral"), score (number in [-1,1]), ` +
+      `confidence (number in [0,1]), rationale (short string), ` +
+      `topDrivers (array of up to 8 words or phrases driving the sentiment).\n\nTEXT:\n${text}`,
+  );
+  if (!out) return null;
+  return {
+    summary: `Sentiment is ${out.label} (score ${out.score}).`,
+    data: {
+      label: out.label,
+      score: out.score,
+      confidence: out.confidence,
+      rationale: out.rationale,
+      topDrivers: out.topDrivers,
+      engine: engineTag(true),
+    },
+  };
+}
+
+/**
+ * Score sentiment with the built-in lexicon engine.
+ *
+ * @param text - The text to analyze.
  * @returns A {@link ServiceResult} with score, label, and contributing tokens.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
-  const { text } = schema.parse(args);
+function lexiconSentiment(text: string): ServiceResult {
   const tokens = tokenize(text);
 
   let rawScore = 0;
@@ -129,8 +165,20 @@ function handler(args: Record<string, unknown>): ServiceResult {
       tokensAnalyzed: tokens.length,
       sentimentTokens: matched,
       topDrivers: drivers.slice(0, 8),
+      engine: engineTag(false),
     },
   };
+}
+
+/**
+ * Analyze sentiment, preferring the LLM engine and falling back to the lexicon.
+ *
+ * @param args - Raw arguments validated against the service schema.
+ * @returns A {@link ServiceResult} with score, label, and drivers.
+ */
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
+  const { text } = schema.parse(args);
+  return (await llmSentiment(text)) ?? lexiconSentiment(text);
 }
 
 /**

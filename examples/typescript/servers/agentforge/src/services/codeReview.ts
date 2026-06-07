@@ -9,8 +9,20 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
 import { clamp, round } from "./util";
+
+interface LlmFinding {
+  severity: "info" | "warning" | "error";
+  line?: number;
+  message: string;
+  suggestion?: string;
+}
+interface LlmReview {
+  findings: LlmFinding[];
+  summary?: string;
+}
 
 interface Rule {
   id: string;
@@ -79,23 +91,27 @@ const schema = z.object({
     .describe("Optional language hint, e.g. typescript, python"),
 });
 
+interface Finding {
+  rule: string;
+  severity: Rule["severity"];
+  line: number;
+  message: string;
+  excerpt: string;
+  suggestion?: string;
+}
+
 /**
- * Review a code snippet against the static rule set.
+ * Review a code snippet against the static rule set, optionally augmented by an
+ * LLM reviewer for semantic issues the regex rules cannot catch.
  *
  * @param args - Raw arguments validated against the service schema.
  * @returns A {@link ServiceResult} with findings, a score, and a grade.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
   const { code, language } = schema.parse(args);
   const lines = code.split(/\r?\n/);
 
-  const findings: Array<{
-    rule: string;
-    severity: Rule["severity"];
-    line: number;
-    message: string;
-    excerpt: string;
-  }> = [];
+  const findings: Finding[] = [];
 
   lines.forEach((line, index) => {
     for (const rule of RULES) {
@@ -120,6 +136,32 @@ function handler(args: Record<string, unknown>): ServiceResult {
     }
   });
 
+  const review = await llmJson<LlmReview>(
+    "You are a senior software engineer performing a code review. Respond ONLY with a JSON object.",
+    `Review the ${language ?? "source"} CODE for bugs, security issues, and design problems that ` +
+      `simple linters miss. Return JSON with keys: findings (array of objects with severity ` +
+      `("info"|"warning"|"error"), line (number, optional), message (string), suggestion (string, ` +
+      `optional)) and summary (string).\n\nCODE:\n${code}`,
+  );
+
+  let usedLlm = false;
+  let aiSummary: string | undefined;
+  if (review) {
+    usedLlm = true;
+    aiSummary = review.summary;
+    for (const f of review.findings ?? []) {
+      if (!f || !f.message) continue;
+      findings.push({
+        rule: "ai-review",
+        severity: f.severity === "error" || f.severity === "warning" ? f.severity : "info",
+        line: typeof f.line === "number" ? f.line : 0,
+        message: f.message,
+        excerpt: typeof f.line === "number" ? (lines[f.line - 1]?.trim().slice(0, 160) ?? "") : "",
+        suggestion: f.suggestion,
+      });
+    }
+  }
+
   const penalty = findings.reduce((sum, f) => sum + (SEVERITY_WEIGHT[f.severity] ?? 1), 0);
   const score = clamp(round(100 - penalty, 0), 0, 100);
   const grade = score >= 90 ? "A" : score >= 80 ? "B" : score >= 70 ? "C" : score >= 60 ? "D" : "F";
@@ -139,6 +181,8 @@ function handler(args: Record<string, unknown>): ServiceResult {
       lineCount: lines.length,
       findingCounts: counts,
       findings: findings.slice(0, 100),
+      aiSummary,
+      engine: engineTag(usedLlm),
     },
   };
 }

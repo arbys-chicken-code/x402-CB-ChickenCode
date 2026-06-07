@@ -8,8 +8,16 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
 import { round, tokenize } from "./util";
+
+interface LlmLanguage {
+  language: string;
+  languageCode: string;
+  confidence: number;
+  script?: string;
+}
 
 const PROFILES: Record<string, { name: string; markers: string[] }> = {
   en: {
@@ -51,13 +59,38 @@ const schema = z.object({
 });
 
 /**
- * Detect the most likely language of a body of text.
+ * Detect language via the configured LLM, when available (covers any language).
  *
- * @param args - Raw arguments validated against the service schema.
+ * @param text - The text whose language to detect.
+ * @returns A {@link ServiceResult}, or null to fall back to the profile engine.
+ */
+async function llmDetect(text: string): Promise<ServiceResult | null> {
+  const out = await llmJson<LlmLanguage>(
+    "You are a language identification engine. Respond ONLY with a JSON object.",
+    `Identify the language of the TEXT. Return JSON with keys: language (English name), ` +
+      `languageCode (ISO 639-1, or 639-3 if no two-letter code), confidence (0..1), ` +
+      `script (e.g. Latin, Cyrillic, Han).\n\nTEXT:\n${text}`,
+  );
+  if (!out) return null;
+  return {
+    summary: `Detected ${out.language} (confidence ${out.confidence}).`,
+    data: {
+      language: out.language,
+      languageCode: out.languageCode,
+      confidence: out.confidence,
+      script: out.script,
+      engine: engineTag(true),
+    },
+  };
+}
+
+/**
+ * Detect language with the built-in stop-word profile engine.
+ *
+ * @param text - The text whose language to detect.
  * @returns A {@link ServiceResult} with the top language and ranked candidates.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
-  const { text } = schema.parse(args);
+function profileDetect(text: string): ServiceResult {
   const tokens = tokenize(text);
   const tokenSet = tokens;
 
@@ -92,8 +125,20 @@ function handler(args: Record<string, unknown>): ServiceResult {
       confidence: top.confidence,
       candidates: candidates.slice(0, 5),
       tokensAnalyzed: tokens.length,
+      engine: engineTag(false),
     },
   };
+}
+
+/**
+ * Detect language, preferring the LLM engine and falling back to profiling.
+ *
+ * @param args - Raw arguments validated against the service schema.
+ * @returns A {@link ServiceResult} describing the detected language.
+ */
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
+  const { text } = schema.parse(args);
+  return (await llmDetect(text)) ?? profileDetect(text);
 }
 
 /**

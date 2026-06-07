@@ -9,6 +9,7 @@
 
 import type { AppConfig } from "./config";
 import type { PaymentLayer } from "./payments";
+import { getLlm } from "./providers";
 import { SERVICES } from "./services";
 
 /**
@@ -63,6 +64,28 @@ export function buildCatalog(config: AppConfig, payments: PaymentLayer): Record<
         baseUrl: config.httpPublicUrl,
         protocol: "rest",
         description: "REST API. Send payment via the x402 flow (HTTP 402 challenge).",
+      },
+    },
+    capabilities: {
+      llm: {
+        enabled: getLlm().isConfigured(),
+        model: getLlm().isConfigured() ? getLlm().modelName() : null,
+        poweredServices: [
+          "sentiment_analysis",
+          "text_summarization",
+          "entity_extraction",
+          "language_detection",
+          "research_brief",
+          "code_review",
+        ],
+      },
+      marketData: {
+        crypto: { provider: "coingecko", requiresKey: false },
+        equities: {
+          provider: "alphavantage",
+          requiresKey: true,
+          configured: Boolean(config.marketData.alphaVantageApiKey),
+        },
       },
     },
     serviceCount: services.length,

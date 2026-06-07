@@ -1,17 +1,17 @@
 /**
  * Market intelligence service.
  *
- * Produces a deterministic-but-plausible technical and fundamental snapshot for
- * a ticker symbol, including momentum indicators and a composite signal. Output
- * is seeded by the ticker so it is reproducible. This is a synthetic analytics
- * engine for demonstration — wire it to a real market-data provider in
- * production by replacing {@link buildSnapshot}.
+ * Fetches **live** market data and computes a technical + fundamental snapshot
+ * with a composite trading signal. Crypto is sourced from CoinGecko (key-free);
+ * equities from Alpha Vantage (requires `ALPHAVANTAGE_API_KEY`). All indicators
+ * (RSI-14, SMA-50/200, volatility) are derived from real historical closes.
  */
 
 import { z } from "zod";
 
+import { getMarketData, type MarketSnapshot } from "../providers";
 import type { ServiceDefinition, ServiceResult } from "./types";
-import { clamp, hashString, round, seededRng } from "./util";
+import { clamp, round } from "./util";
 
 const schema = z.object({
   ticker: z
@@ -27,84 +27,77 @@ const schema = z.object({
 });
 
 /**
- * Build a synthetic but deterministic market snapshot for a ticker.
+ * Compute a composite buy/sell signal from real indicators.
  *
- * @param ticker - Normalized ticker symbol.
- * @param horizon - Analysis horizon.
- * @returns Structured indicators, fundamentals, and a composite signal.
+ * Indicators that are unavailable (null) simply do not contribute, so the
+ * signal degrades gracefully for assets with limited history.
+ *
+ * @param snapshot - The live market snapshot.
+ * @returns The signal action, normalized score, and confidence.
  */
-function buildSnapshot(
-  ticker: string,
-  horizon: "intraday" | "swing" | "long_term",
-): Record<string, unknown> {
-  const rng = seededRng(hashString(`${ticker}:${horizon}`));
-
-  const price = round(5 + rng() * 800, 2);
-  const changePct = round((rng() - 0.5) * (horizon === "intraday" ? 6 : 14), 2);
-  const rsi = round(20 + rng() * 60, 1);
-  const sma50 = round(price * (0.85 + rng() * 0.3), 2);
-  const sma200 = round(price * (0.7 + rng() * 0.5), 2);
-  const volatility = round(0.1 + rng() * 0.6, 3);
-  const peRatio = round(8 + rng() * 45, 1);
-  const volume = Math.floor(1e5 + rng() * 5e7);
-
-  // Composite score blends momentum, trend, and mean-reversion cues.
+function computeSignal(snapshot: MarketSnapshot): {
+  action: "strong_buy" | "buy" | "hold" | "sell" | "strong_sell";
+  compositeScore: number;
+  confidence: number;
+} {
+  const { quote, technical } = snapshot;
   let score = 0;
-  score += rsi < 30 ? 1.2 : rsi > 70 ? -1.2 : 0;
-  score += price > sma50 ? 0.8 : -0.8;
-  score += sma50 > sma200 ? 1 : -1; // golden vs death cross
-  score += changePct > 0 ? 0.5 : -0.5;
-  score -= volatility > 0.5 ? 0.6 : 0;
+  let signals = 0;
 
-  const normalized = round(clamp(Math.tanh(score / 2), -1, 1), 4);
-  let signal: "strong_buy" | "buy" | "hold" | "sell" | "strong_sell";
-  if (normalized > 0.5) signal = "strong_buy";
-  else if (normalized > 0.15) signal = "buy";
-  else if (normalized < -0.5) signal = "strong_sell";
-  else if (normalized < -0.15) signal = "sell";
-  else signal = "hold";
+  if (technical.rsi14 != null) {
+    score += technical.rsi14 < 30 ? 1.2 : technical.rsi14 > 70 ? -1.2 : 0;
+    signals += 1;
+  }
+  if (technical.sma50 != null && quote.price) {
+    score += quote.price > technical.sma50 ? 0.8 : -0.8;
+    signals += 1;
+  }
+  if (technical.sma50 != null && technical.sma200 != null) {
+    score += technical.sma50 > technical.sma200 ? 1 : -1; // golden vs death cross
+    signals += 1;
+  }
+  if (quote.changePercent != null) {
+    score += quote.changePercent > 0 ? 0.5 : -0.5;
+    signals += 1;
+  }
+  if (technical.annualizedVolatility != null && technical.annualizedVolatility > 0.8) {
+    score -= 0.6;
+  }
+
+  const normalized = signals === 0 ? 0 : round(clamp(Math.tanh(score / 2), -1, 1), 4);
+  let action: "strong_buy" | "buy" | "hold" | "sell" | "strong_sell";
+  if (normalized > 0.5) action = "strong_buy";
+  else if (normalized > 0.15) action = "buy";
+  else if (normalized < -0.5) action = "strong_sell";
+  else if (normalized < -0.15) action = "sell";
+  else action = "hold";
 
   return {
-    ticker,
-    horizon,
-    quote: { price, changePercent: changePct, volume },
-    technical: {
-      rsi14: rsi,
-      sma50,
-      sma200,
-      trend: sma50 > sma200 ? "uptrend" : "downtrend",
-      annualizedVolatility: volatility,
-    },
-    fundamental: {
-      peRatio,
-      valuation: peRatio > 35 ? "rich" : peRatio < 15 ? "cheap" : "fair",
-    },
-    signal: {
-      action: signal,
-      compositeScore: normalized,
-      confidence: round(0.5 + Math.abs(normalized) / 2, 4),
-    },
-    disclaimer:
-      "Synthetic analytics for demonstration. Not investment advice. Replace buildSnapshot() " +
-      "with a licensed market-data feed for production use.",
+    action,
+    compositeScore: normalized,
+    confidence: round(clamp(0.4 + (Math.abs(normalized) / 2) * (signals / 4), 0, 1), 4),
   };
 }
 
 /**
- * Generate a market intelligence report for a ticker.
+ * Generate a market intelligence report from live data.
  *
  * @param args - Raw arguments validated against the service schema.
- * @returns A {@link ServiceResult} containing the market snapshot.
+ * @returns A {@link ServiceResult} containing the live market snapshot + signal.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
   const { ticker, horizon } = schema.parse(args);
-  const normalizedTicker = ticker.toUpperCase();
-  const snapshot = buildSnapshot(normalizedTicker, horizon ?? "swing");
-  const signal = (snapshot.signal as { action: string }).action;
+  const snapshot = await getMarketData().getSnapshot(ticker);
+  const signal = computeSignal(snapshot);
 
   return {
-    summary: `${normalizedTicker}: ${signal.replace("_", " ")} signal.`,
-    data: snapshot,
+    summary: `${snapshot.ticker} (${snapshot.assetClass}): ${signal.action.replace("_", " ")} — source ${snapshot.source}.`,
+    data: {
+      ...snapshot,
+      horizon: horizon ?? "swing",
+      signal,
+      disclaimer: "Informational market analytics derived from live data. Not financial advice.",
+    },
   };
 }
 
@@ -116,8 +109,8 @@ export const marketIntelligenceService: ServiceDefinition = {
   title: "Market Intelligence",
   category: "markets",
   description:
-    "Generate a technical + fundamental snapshot for any ticker (equities or crypto), including " +
-    "RSI, moving-average trend, volatility, valuation, and a composite buy/sell signal.",
+    "Live technical + fundamental snapshot for any ticker (crypto via CoinGecko, equities via " +
+    "Alpha Vantage): real RSI-14, SMA-50/200 trend, annualized volatility, P/E, and a composite signal.",
   price: "$0.05",
   shape: schema.shape,
   inputSchema: {
@@ -132,12 +125,14 @@ export const marketIntelligenceService: ServiceDefinition = {
     },
     required: ["ticker"],
   },
-  exampleInput: { ticker: "AAPL", horizon: "swing" },
+  exampleInput: { ticker: "BTC", horizon: "swing" },
   exampleOutput: {
-    ticker: "AAPL",
-    quote: { price: 212.4, changePercent: 1.8, volume: 38450120 },
-    technical: { rsi14: 58.2, trend: "uptrend" },
-    signal: { action: "buy", compositeScore: 0.41, confidence: 0.71 },
+    ticker: "BTC",
+    assetClass: "crypto",
+    source: "coingecko",
+    quote: { price: 67000.12, changePercent: 1.8, volume: 38450120000 },
+    technical: { rsi14: 58.2, sma50: 64000, sma200: 59000, trend: "uptrend" },
+    signal: { action: "buy", compositeScore: 0.41, confidence: 0.66 },
   },
   http: { method: "POST", path: "/v1/market-intelligence" },
   handler,

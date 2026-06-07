@@ -8,8 +8,15 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
 import { contentWordFrequencies, round, splitSentences, tokenize } from "./util";
+
+interface LlmSummary {
+  summary: string;
+  keyPoints: string[];
+  keywords: string[];
+}
 
 const schema = z.object({
   text: z
@@ -27,15 +34,39 @@ const schema = z.object({
 });
 
 /**
+ * Produce an abstractive summary via the configured LLM, when available.
+ *
+ * @param text - The text to summarize.
+ * @param limit - Target maximum number of sentences.
+ * @returns A {@link ServiceResult}, or null to fall back to extractive mode.
+ */
+async function llmSummarize(text: string, limit: number): Promise<ServiceResult | null> {
+  const out = await llmJson<LlmSummary>(
+    "You are an expert summarization engine. Respond ONLY with a JSON object.",
+    `Summarize the TEXT in at most ${limit} sentence(s). Return JSON with keys: ` +
+      `summary (string), keyPoints (array of concise bullet strings), ` +
+      `keywords (array of up to 10 salient terms).\n\nTEXT:\n${text}`,
+  );
+  if (!out) return null;
+  return {
+    summary: `Summarized to ${out.keyPoints?.length ?? 0} key points.`,
+    data: {
+      summaryText: out.summary,
+      keyPoints: out.keyPoints ?? [],
+      keywords: out.keywords ?? [],
+      engine: engineTag(true),
+    },
+  };
+}
+
+/**
  * Produce an extractive summary and keywords for a body of text.
  *
- * @param args - Raw arguments validated against the service schema.
+ * @param text - The text to summarize.
+ * @param limit - Maximum number of sentences in the summary.
  * @returns A {@link ServiceResult} with the summary, keywords, and stats.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
-  const { text, maxSentences } = schema.parse(args);
-  const limit = maxSentences ?? 3;
-
+function extractiveSummarize(text: string, limit: number): ServiceResult {
   const sentences = splitSentences(text);
   const freq = contentWordFrequencies(tokenize(text));
   const maxFreq = Math.max(1, ...freq.values());
@@ -74,8 +105,21 @@ function handler(args: Record<string, unknown>): ServiceResult {
       originalSentenceCount: sentences.length,
       summarySentenceCount: summarySentences.length,
       compressionRatio: compression,
+      engine: engineTag(false),
     },
   };
+}
+
+/**
+ * Summarize text, preferring the LLM engine and falling back to extractive.
+ *
+ * @param args - Raw arguments validated against the service schema.
+ * @returns A {@link ServiceResult} with the summary and keywords.
+ */
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
+  const { text, maxSentences } = schema.parse(args);
+  const limit = maxSentences ?? 3;
+  return (await llmSummarize(text, limit)) ?? extractiveSummarize(text, limit);
 }
 
 /**

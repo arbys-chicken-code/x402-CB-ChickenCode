@@ -8,7 +8,15 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
+
+interface LlmEntities {
+  people?: string[];
+  organizations?: string[];
+  locations?: string[];
+  products?: string[];
+}
 
 const PATTERNS: Record<string, RegExp> = {
   emails: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
@@ -56,10 +64,14 @@ function extractProperNouns(text: string): string[] {
 /**
  * Extract structured entities from text.
  *
+ * Pattern-based extraction (emails, URLs, money, dates, ...) always runs. When
+ * an LLM is configured, named-entity categories (people, organizations,
+ * locations, products) are added for true NER coverage.
+ *
  * @param args - Raw arguments validated against the service schema.
  * @returns A {@link ServiceResult} with grouped entities and a total count.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
   const { text } = schema.parse(args);
 
   const entities: Record<string, string[]> = {};
@@ -73,10 +85,28 @@ function handler(args: Record<string, unknown>): ServiceResult {
     }
   }
 
-  const properNouns = extractProperNouns(text);
-  if (properNouns.length > 0) {
-    entities.properNouns = properNouns;
-    total += properNouns.length;
+  const named = await llmJson<LlmEntities>(
+    "You are a precise named-entity recognition engine. Respond ONLY with a JSON object.",
+    `Extract named entities from the TEXT. Return JSON with keys people, organizations, ` +
+      `locations, products — each an array of unique strings (empty if none).\n\nTEXT:\n${text}`,
+  );
+
+  let usedLlm = false;
+  if (named) {
+    usedLlm = true;
+    for (const key of ["people", "organizations", "locations", "products"] as const) {
+      const values = unique(named[key] ?? []);
+      if (values.length > 0) {
+        entities[key] = values;
+        total += values.length;
+      }
+    }
+  } else {
+    const properNouns = extractProperNouns(text);
+    if (properNouns.length > 0) {
+      entities.properNouns = properNouns;
+      total += properNouns.length;
+    }
   }
 
   return {
@@ -85,6 +115,7 @@ function handler(args: Record<string, unknown>): ServiceResult {
       entities,
       totalEntities: total,
       categories: Object.keys(entities),
+      engine: engineTag(usedLlm),
     },
   };
 }

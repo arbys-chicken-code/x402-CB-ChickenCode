@@ -72,6 +72,7 @@ function handler(args: Record<string, unknown>): ServiceResult {
       fleschKincaidGrade: Math.max(0, fleschKincaid),
       gunningFogIndex: Math.max(0, gunningFog),
       audience: audienceFor(flesch),
+      engine: "builtin",
       statistics: {
         wordCount,
         sentenceCount,

@@ -10,8 +10,17 @@
 
 import { z } from "zod";
 
+import { engineTag, llmJson } from "./llm";
 import type { ServiceDefinition, ServiceResult } from "./types";
 import { contentWordFrequencies, splitSentences, tokenize } from "./util";
+
+interface LlmBrief {
+  thesis: string;
+  keyFindings: string[];
+  openQuestions: string[];
+  suggestedNextSteps: string[];
+  keywords?: string[];
+}
 
 const schema = z.object({
   topic: z
@@ -57,16 +66,60 @@ function gatherContext(notes: string, limit: number): string[] {
 }
 
 /**
- * Synthesize a structured research brief.
+ * Synthesize a research brief via the configured LLM, when available.
  *
- * @param args - Raw arguments validated against the service schema.
+ * @param topic - The research topic or question.
+ * @param notes - Optional source notes.
+ * @param depth - Desired depth.
+ * @returns A {@link ServiceResult}, or null to fall back to extractive synthesis.
+ */
+async function llmBrief(
+  topic: string,
+  notes: string,
+  depth: "brief" | "standard" | "deep",
+): Promise<ServiceResult | null> {
+  const findingsLimit = depth === "deep" ? 8 : depth === "brief" ? 3 : 5;
+  const out = await llmJson<LlmBrief>(
+    "You are a rigorous research analyst. Be evidence-driven and avoid fabricating sources. " +
+      "Respond ONLY with a JSON object.",
+    `Produce a ${depth} research brief on the TOPIC, grounded in the SOURCE NOTES when provided. ` +
+      `Return JSON with keys: thesis (string), keyFindings (array of up to ${findingsLimit} strings), ` +
+      `openQuestions (array of strings), suggestedNextSteps (array of strings), keywords (array of strings). ` +
+      `If notes are insufficient, say so in the thesis rather than inventing facts.\n\n` +
+      `TOPIC: ${topic}\n\nSOURCE NOTES:\n${notes || "(none provided)"}`,
+  );
+  if (!out) return null;
+  return {
+    summary: `Synthesized a ${depth} LLM brief on "${topic}" with ${out.keyFindings?.length ?? 0} findings.`,
+    data: {
+      topic,
+      depth,
+      thesis: out.thesis,
+      keyFindings: out.keyFindings ?? [],
+      keywords: out.keywords ?? [],
+      openQuestions: out.openQuestions ?? [],
+      suggestedNextSteps: out.suggestedNextSteps ?? [],
+      engine: engineTag(true),
+    },
+  };
+}
+
+/**
+ * Synthesize a structured research brief from source notes (extractive).
+ *
+ * @param topic - The research topic or question.
+ * @param notes - Optional source notes.
+ * @param depth - Desired depth.
  * @returns A {@link ServiceResult} containing the structured brief.
  */
-function handler(args: Record<string, unknown>): ServiceResult {
-  const { topic, notes, depth } = schema.parse(args);
+function extractiveBrief(
+  topic: string,
+  notes: string,
+  depth: "brief" | "standard" | "deep",
+): ServiceResult {
   const findingsLimit = depth === "deep" ? 8 : depth === "brief" ? 3 : 5;
 
-  const sourceNotes = notes?.trim() ?? "";
+  const sourceNotes = notes.trim();
   const findings = gatherContext(sourceNotes, findingsLimit);
   const keywords = [...contentWordFrequencies(tokenize(`${topic} ${sourceNotes}`)).entries()]
     .sort((a, b) => b[1] - a[1])
@@ -93,18 +146,35 @@ function handler(args: Record<string, unknown>): ServiceResult {
   ].filter((s): s is string => Boolean(s));
 
   return {
-    summary: `Synthesized a ${depth ?? "standard"} brief on "${topic}" with ${findings.length} findings.`,
+    summary: `Synthesized a ${depth} brief on "${topic}" with ${findings.length} findings.`,
     data: {
       topic,
-      depth: depth ?? "standard",
+      depth,
       thesis,
       keyFindings: findings,
       keywords,
       openQuestions,
       suggestedNextSteps: nextSteps,
       sourceSentenceCount: splitSentences(sourceNotes).length,
+      engine: engineTag(false),
     },
   };
+}
+
+/**
+ * Synthesize a research brief, preferring the LLM and falling back to extractive.
+ *
+ * @param args - Raw arguments validated against the service schema.
+ * @returns A {@link ServiceResult} containing the structured brief.
+ */
+async function handler(args: Record<string, unknown>): Promise<ServiceResult> {
+  const { topic, notes, depth } = schema.parse(args);
+  const resolvedDepth = depth ?? "standard";
+  const sourceNotes = notes ?? "";
+  return (
+    (await llmBrief(topic, sourceNotes, resolvedDepth)) ??
+    extractiveBrief(topic, sourceNotes, resolvedDepth)
+  );
 }
 
 /**
