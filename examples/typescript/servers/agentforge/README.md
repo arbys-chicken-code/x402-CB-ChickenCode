@@ -33,7 +33,13 @@ AgentForge takes the official x402 MCP example (one paid `get_weather` tool) and
 
 Plus **free** utility surfaces: `ping` and `list_services` MCP tools, and `GET /`, `/catalog`, `/.well-known/x402`, `/health`, `/metrics`, `/receipts` HTTP endpoints.
 
-> The service implementations are self-contained heuristics so the suite runs with **no external API keys**. Each module documents the single function to swap (e.g. `buildSnapshot`, `gatherContext`) to wire in a real data provider or LLM for production.
+### How the services produce real output
+
+- **Market Intelligence** uses **live data**: crypto from [CoinGecko](https://www.coingecko.com/en/api) (key-free) and equities from [Alpha Vantage](https://www.alphavantage.co) (free key). RSI-14, SMA-50/200 trend, and annualized volatility are computed from real historical closes — there is no synthetic data; if data can't be sourced the call returns an honest error and **is not charged**.
+- **Sentiment, Summarization, Entity Extraction, Language Detection, Research Brief, Code Review** use a real **LLM** (any OpenAI-compatible endpoint) when `LLM_API_KEY` is configured, for production-grade output. Each response includes an `engine` field (`llm:<model>` or `builtin`).
+- **Readability** uses the industry-standard Flesch / Flesch–Kincaid / Gunning Fog formulas — exact and deterministic by definition.
+
+If no `LLM_API_KEY` is set, the LLM-backed services gracefully fall back to solid built-in algorithms so the suite always runs — but for a real product you should configure the providers below.
 
 ## Architecture
 
@@ -81,12 +87,29 @@ pnpm dev
 | `EVM_ADDRESS`                             | ✅       | —                              | Wallet address that receives USDC payments                              |
 | `FACILITATOR_URL`                         | ✅       | `https://x402.org/facilitator` | x402 facilitator for verify/settle                                      |
 | `NETWORK`                                 |          | `eip155:84532`                 | CAIP-2 network (Base Sepolia by default; use `eip155:8453` for mainnet) |
-| `MCP_PORT`                                |          | `4022`                         | Port for the MCP (SSE) transport                                        |
-| `HTTP_PORT`                               |          | `4021`                         | Port for the REST API                                                   |
+| `PORT`                                    |          | —                              | If set (Railway/PaaS), serves **both** transports on this one port      |
+| `MCP_PORT`                                |          | `4022`                         | MCP (SSE) port when `PORT` is unset                                     |
+| `HTTP_PORT`                               |          | `4021`                         | REST API port when `PORT` is unset                                      |
 | `MCP_PUBLIC_URL` / `HTTP_PUBLIC_URL`      |          | localhost                      | Public origins advertised in the catalog                                |
+| `LLM_API_KEY`                             |          | —                              | Enables real LLM-powered NLP/research/code services                     |
+| `LLM_BASE_URL`                            |          | `https://api.openai.com/v1`    | OpenAI-compatible endpoint                                              |
+| `LLM_MODEL`                               |          | `gpt-4o-mini`                  | Model id used for LLM services                                          |
+| `COINGECKO_API_KEY`                       |          | —                              | Optional; raises CoinGecko rate limits (crypto works key-free)          |
+| `ALPHAVANTAGE_API_KEY`                    |          | —                              | Required for **equity** tickers in market intelligence                  |
+| `PROVIDER_TIMEOUT_MS`                     |          | `15000`                        | Upstream provider request timeout                                       |
 | `LOG_LEVEL`                               |          | `info`                         | `debug` \| `info` \| `warn` \| `error`                                  |
 | `RATE_LIMIT_MAX` / `RATE_LIMIT_WINDOW_MS` |          | `120` / `60000`                | Rate limit per payer/IP per window                                      |
 | `PRICE_MULTIPLIER`                        |          | `1.0`                          | Global multiplier applied to every base price                           |
+
+### Providers & secrets (for production-grade output)
+
+| Capability            | Provider                  | Secret                                        | Notes                                                  |
+| --------------------- | ------------------------- | --------------------------------------------- | ------------------------------------------------------ |
+| LLM NLP/research/code | Any OpenAI-compatible API | `LLM_API_KEY` (+ `LLM_BASE_URL`, `LLM_MODEL`) | OpenAI, Azure, OpenRouter, Together, Groq, self-hosted |
+| Crypto market data    | CoinGecko                 | _none_ (optional `COINGECKO_API_KEY`)         | Works key-free; key raises rate limits                 |
+| Equity market data    | Alpha Vantage             | `ALPHAVANTAGE_API_KEY`                        | Free key at alphavantage.co                            |
+
+Add these as deployment secrets (Railway Variables) — never commit them.
 
 ## Using the suite
 
@@ -148,7 +171,21 @@ docker run -p 4021:4021 -p 4022:4022 \
   agentforge
 ```
 
-On **Railway / Render / Fly.io**: point the service at this Dockerfile path, keep the build context at the repo root, expose ports `4021` (REST) and `4022` (MCP/SSE), and set the environment variables above in the dashboard.
+#### Railway (one repo, zero build config)
+
+A [`railway.json`](../../../../railway.json) at the repo root already tells Railway to build this Dockerfile from the repo root, so you don't configure the builder by hand:
+
+1. **New Project → Deploy from GitHub repo** and pick this repo.
+2. In **Variables**, set at minimum:
+   - `EVM_ADDRESS` = `0xed7d30e8bc643503f9da261ed8e623bb6ecf6189`
+   - `FACILITATOR_URL` = `https://x402.org/facilitator`
+   - `NETWORK` = `eip155:84532` (testnet) — switch to `eip155:8453` for real revenue
+   - (recommended) `LLM_API_KEY`, optionally `LLM_BASE_URL` / `LLM_MODEL`
+   - (for stock tickers) `ALPHAVANTAGE_API_KEY`
+3. Deploy. Railway injects `PORT`, which puts the suite in **single-port mode** — both the REST API and the MCP SSE endpoint are served from your one public Railway URL (`https://<app>.up.railway.app` and `https://<app>.up.railway.app/sse`).
+4. After it's healthy, set `HTTP_PUBLIC_URL` and `MCP_PUBLIC_URL` to that public URL so the catalog advertises correct addresses, and redeploy.
+
+> Render / Fly.io work the same way — point them at `examples/typescript/servers/agentforge/Dockerfile` with the repo root as build context. When a single `PORT` is provided the suite serves both transports on it; otherwise it uses `HTTP_PORT` + `MCP_PORT`.
 
 ### Option B — Plain Node (VM / bare metal)
 
@@ -197,7 +234,7 @@ curl http://localhost:4021/receipts   # recent settlement transactions
 
 Add a new service in three steps:
 
-1. Create `src/services/myService.ts` exporting a `ServiceDefinition` (schema, price, discovery metadata, handler).
+1. Create `src/services/myService.ts` exporting a `ServiceDefinition` (schema, price, discovery metadata, handler). Use the [LLM helper](./src/services/llm.ts) (`llmJson`) or a [provider](./src/providers) for real integrations.
 2. Add it to the `SERVICES` array in [`src/services/index.ts`](./src/services/index.ts).
 3. Done — it is automatically exposed as a paid MCP tool **and** a REST endpoint, added to the catalog, and made discoverable.
 
@@ -212,4 +249,4 @@ Add a new service in three steps:
 
 ## Disclaimer
 
-The intelligence services use deterministic, self-contained heuristics for demonstration and are **not** a substitute for production models or licensed data feeds (in particular, `market_intelligence` output is synthetic and is **not** investment advice). Replace the documented seam in each service to integrate real providers.
+Market intelligence is built from live third-party data (CoinGecko / Alpha Vantage); respect their terms and rate limits, and note that its analytics are **informational only and not financial advice**. LLM-backed services depend on your configured model provider and incur that provider's usage costs. Without an `LLM_API_KEY`, those services fall back to capable but simpler built-in algorithms.
