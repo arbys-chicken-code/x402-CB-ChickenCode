@@ -10,6 +10,7 @@ import { ZodError } from "zod";
 
 import type { Logger } from "./logger";
 import type { Metrics } from "./metrics";
+import { ProviderError } from "./providers";
 import type { ServiceDefinition } from "./services";
 
 /**
@@ -74,6 +75,18 @@ export async function runService(
             message: issue.message,
           })),
         },
+        generatedAt,
+      };
+    }
+
+    // Surface upstream provider failures (e.g. market-data unavailable, missing
+    // key) with their actionable message so callers understand what to fix.
+    if (error instanceof ProviderError) {
+      logger.warn("Provider error", { service: service.name, message: error.message });
+      return {
+        ok: false,
+        service: service.name,
+        error: { type: "provider_error", message: error.message },
         generatedAt,
       };
     }
